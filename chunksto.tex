@@ -1,0 +1,74 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% chunk.nw --- Advice's chunk store main tex file
+%% Author          : Francisco J. Ballesteros
+%% Created On      : Mon Jun 24 21:36:31 1996
+%% Last Modified By: Francisco J. Ballesteros
+%% Last Modified On: Mon Aug 19 14:24:04 1996
+%% Update Count    : 16
+%% VC Id           : $Id: chunksto.tex,v 1.1.1.1 1996/08/19 12:24:04 nemo Exp $ 
+%% Usage           : run latex on this
+%%                 : 
+%% Status          : Spelled, source tested.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\documentclass[dvips]{article}
+\usepackage{epsfig}
+\usepackage{noweb}
+\noweboptions{smallcode,longxref,externalindex,webnumbering}
+
+
+\title{ A Data Structure for Stacked Mappings Management\\
+  \vspace{0.5cm}
+  \textbf{Very Early Draft}}
+\author{ Francisco J. Ballesteros\\
+         \texttt{nemo@gsyc.inf.uc3m.es}}
+
+\date{\today}
+
+\newcommand{\dmm}{\textsc{dmm}}
+\newcommand{\das}{\textsc{das}}
+\newcommand{\ow}{\textsc{owner}}
+\newcommand{\mk}{$\mu$kernel}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+  To manage stacked region mappings, Advice needs a data structure
+  where mapped regions could be reflected. Such data structure should
+  contain information about such regions in such a way that a
+  stacking order is maintained.
+  
+  This document describes the ``chunk store''; the data structure used
+  in Advice to manage stacked mappings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Advice is a Distributed Virtual Memory system providing only one
+abstraction, the distributed address space (\textsc{das} for short). A
+\textsc{das} is a (sparse) chunk of memory
+\cite{ballesteros96:_advice,ballesteros96:_adviceobjs}. Operations are
+provided to map a region onto another and also to unmap it.  Each
+\textsc{das} has a set of mappings and for each mapping there's an
+object named \emph{owner}. The owner is responsible for cooperation
+with it's \textsc{das} to manage its pages. You can see
+figure~\ref{fig:regs} to get the whole picture.
+
+\begin{figure}
+  \center\epsfig{file=regions.eps,width=7cm}
+  \caption{Regions and mappings. Some map could be a remote map.}
+  \label{fig:regs} 
+\end{figure}
+
+In what follows we will describe the ``Chunk Store'' data structure
+and its implementation. Advice uses it to keep track of stacked region
+mappings.
+
+\input{chunk}
+\section*{Index}
+\nowebindex
+\end{document}

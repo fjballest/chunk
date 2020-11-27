@@ -1,0 +1,655 @@
+@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% chunk.nw --- Advice's chunk store noweb source
+%% Author          : Francisco J. Ballesteros
+%% Created On      : Mon Jun 24 21:36:31 1996
+%% Last Modified By: Francisco J. Ballesteros
+%% Last Modified On: Mon Aug 19 15:07:28 1996
+%% Update Count    : 205
+%% VC Id           : $Id: chunk.nw,v 1.1.1.1 1996/08/19 13:07:28 nemo Exp $ 
+%% Usage           : input this & run latex
+%%                 : 
+%% Status          : source tested.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% -------------------------------------------------------------- 
+\section{Stacked mappings}
+
+The problem being solved is stacked mapping management. The problem
+can be stated in terms of points and segments as it is done below.
+
+\begin{itemize}
+\item Start with a set of discrete values\footnote{Virtual addresses
+    in Advice} (e.g., values of type
+  integer).
+\item Then define one or more segments\footnote{Memory mapped region
+    in Advice} in such a set. Each segment is characterized by its
+  first point and its length.
+\item Segments can be \emph{undefined}.
+\item For each segment an identifier\footnote{Ownership in Advice} is
+  given.
+\item The problem to be solved is to locate a segment identifier given
+  a point, taking into account that
+  \begin{itemize}
+  \item Initially, when no segment has been defined, each point in the
+    set has an \emph{undefined} identifier.
+  \item After a segment has been defined, each point inside it will
+    have the identifier asigned to such segment. 
+  \item If a point is inside more than one segment, it will have the
+    identifier of the \emph{last} defined segment.
+  \item If a segment is undefined the problem must be solved as if
+    such segment never had been defined at all.
+  \item A segment can be undefined only if no segment is stacked above
+    it, i.e. there is no other segment containing any of its points.
+  \end{itemize}
+\end{itemize}
+
+Thus, we can imagine a \emph{stack} of segments like that of
+figure~\ref{fig:stkmaps} (Identifiers are given above the segment in
+uppercase.) The identifier of a given point is the identifier of the
+top-most segment which contains it. 
+
+
+\begin{figure}
+  \center\epsfig{file=stkmaps.eps,width=10cm}
+  \caption{Stacked mappings. Each segment is a ``mapped'' segment
+    which could hide (part of) other segments. }
+  \label{fig:stkmaps} 
+\end{figure}
+
+The operations to be supported by the chunk store must be 
+\begin{description}
+\item[segment definition] Addition of a new segment 
+\item[segment undefinition] Deletion of a segment
+\item[point lookup] Find the (segment) identifier for a given point
+\end{description}
+
+
+%% -------------------------------------------------------------- 
+\section{The chunk store}
+
+The chunk store will operate on a set of points with [[vm_offset_t]]
+type.  Thus, each segment will have a starting point and a given
+length. The chunk store will keep track of defined segments
+(identifiers will be of type [[seg_t]]) and will look up the
+identifier for given point.
+
+The following operations have to be implemented:
+
+Initialization
+<<chunk operations>>=
+/* Initialize the chunk store
+ */
+void chk_init(void);
+@ 
+Insertion and removal
+<<chunk operations>>=
+/* Insert a new segment SEG starting at VSTART with length SIZE 
+ * and return error status. 
+ */
+int chk_insert(vm_offset_t vstart, vm_size_t size, seg_t *seg);
+
+/* Erase a previously defined segment starting at VSTART
+ * return error status 
+ */
+int chk_delete(vm_offset_t vstart);
+@
+
+Point lookup
+<<chunk operations>>=
+/* Lookup VADDR and return the segment where it lies.
+ */
+seg_t *chk_lookup(mv_offset_t vaddr);
+@ 
+
+Debug routines
+<<chunk operations>>=
+#ifdef DEBUG
+/* Dump the chunk store to file FP --for debug purposes
+ */
+void chk_dump(FILE *fp);
+#endif
+@ %def chk_init chk_insert chk_delete chk_lookup
+
+Point lookup will be a frequent operation with respect to segment
+insertion and deletion. Thus it should be fast.  One way to achieve
+that is to project the segments onto an imaginary ``surface'' and
+perform the lookup there. So, for example, after segments of
+figure~\ref{fig:stkmaps} have been defined the surface will contain
+these projections:
+\begin{description}
+\item[$i$--$j$] From address $0$ to address $i$, a projection for
+  segment $I$.
+\item[$j$--$n$] From address $j$ to address $n$, a projection for
+  segment $R$.
+\item[$n$--$u$] From address $n$ to address $u$, a projection for
+  segment $N$.
+\item[$u$--$v$] From address $u$ to address $v$, a projection for
+  segment $U$.
+\item[$v$--$m$] From address $v$ to address $m$, a projection for
+  segment $N$.
+\item[$m$--$y$] From address $v$ to address $m$, a projection for
+  segment $X$.
+\end{description}
+ 
+The surface will contain the fragments of the mapped segments with no
+segment above them.  Hidden segments and hidden fragments will not
+appear in the surface. A segment could be partially hidden.
+
+Once the surface has been built, point lookup can be reduced to
+surface searching. 
+
+%% -------------------------------------------------------------- 
+\subsection{The surface array}
+
+If the surface covers the whole set\footnote{The whole address space,
+  in Advice}, the search can be further simplified as we can then
+assume that it will always succeed.
+
+The data structure used for the surface array will be a sorted static
+array (this choice should be revised in the future) so a binary search
+could be used to lookup points. We will keep in such array one entry
+for every fragment or parf of a segment appearing on the surface. The
+entry will contain the starting point and identifier of the fragment
+projected. In what follows, we will refer to fragments of segments as
+chunks; i.e. the surface array is made of those chunks from different
+segments which are not hidden. 
+<<Chunk data type>>=
+/* Information kept per chunk */
+typedef struct chunk_st {
+   seg_t    *seg;               /* owner responsible for this chunk */
+   vaddr_t   vstart;            /* starting virtual address */
+   <<Other chunk information>>
+} chunk_t;
+@ %def chunk_t
+
+By now the data structure will be
+global, but this decision should be revised in the future. The surface
+will contain pointers to chunks so we can modifiy it easily.
+<<Chunk global variables>>=
+static chunk_t *chk_surface[CHK_MAX_SURF_ENT]; /* The surface array */
+static int      chk_surf_nents;                /* # of entries in surf.arry.*/
+@ %def chk_surface chk_surfnents
+
+The number of entries is defined to a fixed value.
+<<Chunk constants>>=
+#define CHK_MAX_SURF_ENT        255 /* Max # of surface entries */
+@ %def CHK_MAX_SURF_ENT
+
+For every chunk inserted two entries will be present in the surface
+array, the first one represents the starting point and the second one
+represents the first point after the last segment point. This is
+somewhat intuitive if you consider the definition of a segment in a
+set: it is specified by two single points. The searching algorithm to
+be used will lookup the bigger entry which is less than the point
+being searched and will assume that the search will always succeed.
+
+Thus, the array should be initialized with an imaginary chunk covering
+the whole address space
+<<Chunk initialization implementation>>=
+void chk_init(void)
+{
+   chk_surf_nents=0;
+   chk_surface[chk_surf_nents++] = &chk_null_chunk_at_zero;
+   chk_surface[chk_surf_nents++] = &chk_null_chunk_at_mmax;
+}
+@ 
+
+
+%% -------------------------------------------------------------- 
+\subsection{Chunk insertion}
+
+We can now sketch the algorithm for [[chk_insert]]. We search surface
+entries for the first and last points of the segment in the surface
+array. With both entries we can determine the surface fragment which
+will be hidden by the new segment definition. At last, such entries
+will be replaced by entries for the new chunk.  
+
+<<chunk insertion implementation>>=
+int chk_insert(vaddr_t vstart, size_t size, seg_t *seg)
+{
+   <<chunk insertion variables>>
+
+   <<find where vstart lies in the surface array>>
+   <<find where vend   lies in the surface array>>
+   <<determine what portion of the surface array will be hiden by this chunk>>
+   <<Replace the hidden portion with the new chunk in the surface array>>
+}/*chk_insert*/
+@ 
+We will declare a variable to store the last point of the segment and
+initialize it. Actually this will contain not the last but the first
+point outside the segment. For simplicity we will refer to it as the
+last segment point.
+<<chunk insertion variables>>=
+   vaddr_t vend = vstart + size;
+@ 
+
+An example run of the insertion algorithm for segments found in
+figure~\ref{fig:stkmaps} is depicted in figure~\ref{fig:surf}. For
+each new segment, we find where the starting and ending points lie in
+the surface array. Surface chunks contained between them will be
+hidden. The first one will only be hidden when the new chunk
+starting address matchs the first address of the fragment ---the point
+present in the surface array. 
+
+Then two entries for the new segment are inserted. The first one, the
+first segment point will represent the new segment. It will save the
+hidden chunks. The second point will represent those points on the
+right of the segment. It has to be inserted in the surface array to
+express that starting on that point the identifier is the one before
+the segment was defined. 
+
+The identifier for the first entry (point) of the chunk will then be
+the new segment identifier. For the second it will be the old one for
+that point before the segment wwas defined.
+
+\begin{figure}
+  \center\epsfig{file=surf.eps,width=10cm}
+  \caption{The chunk store in action.}
+  \label{fig:surf} 
+\end{figure}
+
+To lookup addresses in the surface array and find the entry containing
+the same function ([[chk_surf_lookup]]) can (and will) be used:
+
+<<find where vstart lies in the surface array>>=
+   sstart = chk_surf_lookup(vstart);
+@
+<<find where vend   lies in the surface array>>=
+   send = chk_surf_lookup(vend);
+@
+
+We have to declare these two new variables. They will contain the
+index for the starting and ending points. 
+<<chunk insertion variables>>=
+   int sstart;            /* starting index for chunk in surface array*/
+   int send;              /* ending index for chunk in surface array*/
+@ 
+
+Now that we know where [[vstart]] and [[vend]] are lying we have to
+find what chunks will be hidden by the new segment. To find them we
+take the pointers where the first and the last segment address were
+found. If the first address is equal to the first chunk starting
+address, it will be the first one to be hidden; otherwise it will be
+still (at least in part) at the surface. The last chunk to be hidden
+is that where the last address was found. Of course if there are no
+hidden chunks this will yield a first hidden chunk on the right of the
+last hidden chunk.
+
+<<determine what portion of the surface array will be hiden by this chunk>>=
+   hstart =  (vstart > chk_surface[sstart]->vstart)  
+          ?  sstart+1           /* partly hidden: will hide the next */
+          :  sstart;            /* hidden: this is the first hidden chunk*/
+   hend = send;
+@ 
+
+The two new variables will delimit the hidden chunks. When
+[[hend]]$<$[[hstart]] we will know that there are no hidden chunks.
+<<chunk insertion variables>>=
+   int  hstart;             /* first hidden chunk (or >hend) */
+   int  hend;               /* last hidden chunk (or <hstart) */
+@ 
+
+What remains to be done is to replace the hidden part (if any) with a
+new pair of points (one for chunk and other one for the points on the
+right). Once the old surface fragments are replaced in the array, it
+is convenient to keep them saved in the newly inserted fragment. So,
+when the new chunk be undefined we will be able to restore them easily
+back to the surface array. 
+
+
+
+So we allocate two new chunks, link the hidden ones and insert the new
+point pair. Those entries on the right of the new pair will be shifted
+to keep the array well-formed.
+<<Replace the hidden portion with the new chunk in the surface array>>=
+    new_start = alloc_chunk();  /* create the two new points */
+    new_end   = alloc_chunk();
+   
+    <<Initialize start and end points>>
+    <<Link hidden chunks and compute number of hidden chunks>>
+    <<Shift right points>>
+    <<Insert new point pair and update number of entries>>
+@ 
+
+Two new variables will keep the pointers to the new point pair.
+<<chunk insertion variables>>=
+    chunk_t *new_start;     /* points for the new chunk  */
+    chunk_t *new_end;
+@ 
+
+The new structures have to be initialized. The first new entry
+[[vstart]] will represent the first point of the new segment. Thus it
+will contain the starting address and the new segment identifier. We
+will intialize it with an empty hidden chunk list. 
+<<Initialize start and end points>>=
+    new_start->seg = seg;
+    new_start->vstart = vstart;
+    new_start->chk_hidden = new_start->chk_nxt = NULL;
+    new_start->num_hidden = 0;
+@ 
+
+The second new entry will represent the end of the segment. Thus the
+starting point will be the first one outside the segment and the
+identifier will be the old one for that point.
+<<Initialize start and end points>>=
+    new_end->seg = chk_surface[send]->seg;
+    new_end->vstart = vstart + size;
+    new_end->chk_hidden = new_end->chk_nxt = NULL;
+    new_end->num_hidden = 0;
+@ 
+
+We compute how many hidden chunks there are when we are hidding them
+to save time. Such value is stored in the chunk where the hidden ones
+are linked.
+<<Other chunk information>>=
+   int      num_hidden;         /* number of hidden chunks */
+@ 
+
+We will need some more fields in the chunk information structure to
+keep the hidden fragments linked. One chunk field will point to the chunks
+hidden under it and another will serve to link the hidden ones together. 
+<<Other chunk information>>=
+   struct chunk_st *chk_hidden; /* ptr to the first hidden chunk */
+   struct chunk_st *chk_nxt;    /* ptr to the next hidden chunk  */
+@ 
+
+Now we can link them and compute the number of hidden chunks.
+<<Link hidden chunks and compute number of hidden chunks>>=
+    if (hstart <= hend){                /* there're hidden chunks */
+       int aux = hstart;
+       new_start->num_hidden = hend - hstart + 1;
+       new_start->chk_hidden = chk_surface[hstart];
+       while( aux < hend ){
+          chk_surface[aux]->chk_nxt = chk_surface[++aux];
+       }
+    }
+@ 
+
+The right part of the surface array (exposed to the surface) has to be
+shifted. Being $n$ the number of hidden chunk, such shift will be of
+$2-N$ possitions to the right ( to the left when $2-N<0$). The shift
+will start on the ``next to the last hidden chunk''. The ``$2$'' is
+for the two new entries inserted.
+
+<<Shift right points>>=
+    if ( new_start->num_hidden != 2 ){     /* we have to shift */
+       memmove((void*)(chk_surface+hend + 1 + 2 - new_start->num_hidden), 
+              (void*)(chk_surface+hend + 1), 
+              sizeof(chk_surface[0]) * (chk_surf_nents - hend -1));
+    }
+@ 
+
+The two holes made by the shift will be refilled with the new entries.
+<<Insert new point pair and update number of entries>>=
+    chk_surface[hstart] = new_start;
+    chk_surface[hstart+1] = new_end;
+    chk_surf_nents += 2 - new_start->num_hidden;
+@ 
+
+The insertion routine is now complete.
+
+%% -------------------------------------------------------------- 
+\subsection{Point lookup}
+
+To lookup a point in the surface array we use a binary search
+algorithm modified to return the entry on the left when miss. 
+
+<<Point lookup implementation>>=
+/* Lookup VADDR and return the surface entry where it lies.
+ */
+int chk_surf_lookup(vaddr_t vaddr)
+{
+   int start = 0;
+   int end   = chk_surf_nents-1;
+   int aux;                     /* possibly here? */
+
+   assert(start < end);         /* only works on non-empty surfaces */
+
+   while (start < end) {
+      aux = (start + end) / 2;
+      if (vaddr == chk_surface[aux]->vstart) /* found */
+         return aux;
+      else if (vaddr > chk_surface[aux]->vstart)
+         start = aux+1;
+      else if (vaddr < chk_surface[aux]->vstart)
+         end = aux-1;
+   } 
+
+   <<Check that we have found the point>>
+   <<return the entry found>>
+}/*chk_surf_lookup*/
+@ %def chk_surf_lookup
+
+To check that we have found the point [[assert]] will be used. We have
+found it if the point is in the segment where the binary search
+stopped or the point is on the entry on the left (As the binary search
+searches for equality and the point may be in the middle of two
+surface points the point the point can be in the chunk on the left).
+<<Check that we have found the point>>=
+   assert(( start && 
+            chk_surface[start-1]->vstart   <= vaddr &&
+            chk_surface[start]->vstart     > vaddr) ||
+          ( chk_surface[start]->vstart   <= vaddr &&
+            chk_surface[start+1]->vstart > vaddr));
+@ 
+
+The entry returned can thus be the one found or the previous one for
+the same reason.
+<<return the entry found>>=
+   if (chk_surface[start]->vstart <= vaddr)
+     return(start);
+   else
+     return(start - 1);
+@
+
+The [[chk_lookup]] routine can be easily implemented now. 
+<<Point lookup implementation>>=
+/* Lookup VADDR and return the segment where it lies.
+ */
+seg_t *chk_lookup(vaddr_t vaddr)
+{
+   return(chk_surface[chk_surf_lookup(vaddr)]->seg);
+}
+
+@ 
+
+%% -------------------------------------------------------------- 
+\subsection{Segment deletion}
+
+To undefine a segment the two surface points for the segment are
+simply replaced by its hidden points.
+
+<<Segment deletion implementation>>=
+/* Erase a previously defined segment starting at VSTART
+ * return error status 
+ */
+int chk_delete(vaddr_t vstart)
+{
+    <<Chunk deletion local variables>>
+
+    <<Find the chunk for this address>>
+    <<Replace the chunk pair in the surface array with the hidden chunks>>
+}/*chk_delete*/
+@ 
+
+The segment can be found easily using the lookup routine defined
+above. We will keep both the index in the surface array and a pointer
+to the chunk.
+<<Find the chunk for this address>>=
+    istart = chk_surf_lookup(vstart);
+    cstart = chk_surface[istart];
+@ 
+
+<<Chunk deletion local variables>>=
+    int      istart;            /* index for start chunk */
+    chunk_t *cstart;            /* start chunk */
+@ 
+
+To replace the entries we shift part of the array and refill the
+hidden ones. We will also release the memory of the second entry of
+the segment as all the information neede is contained in the first entry. 
+<<Replace the chunk pair in the surface array with the hidden chunks>>=
+    free_chunk(chk_surface[istart+1]); /* won't need it */
+
+    if (cstart->num_hidden != 2){
+       <<Shift right points for chunk deletion and update entry count>>
+    }
+    <<Insert the hidden points>>
+@ 
+
+The shift is made using the same simple arithmetic done with the
+insertion shift.
+<<Shift right points for chunk deletion and update entry count>>=
+       memmove((void*)(chk_surface + istart + cstart->num_hidden), 
+              (void*)(chk_surface + istart + 2), 
+              sizeof(chk_surface[0]) * (chk_surf_nents - istart +2));
+       chk_surf_nents += cstart->num_hidden - 2;
+@ 
+
+Insertion of hidden points will be done using the links. The first
+chunk entry can now be destroyed safely.
+<<Insert the hidden points>>=
+    aux=cstart;
+    cstart=cstart->chk_hidden;
+    free_chunk(aux);
+    while(cstart!=NULL){
+       chk_surface[istart] = cstart;
+       cstart=cstart->chk_nxt;
+       chk_surface[istart++]->chk_nxt = NULL;
+    }
+@ 
+
+<<Chunk deletion local variables>>=
+    chunk_t *aux;
+@ 
+
+%% -------------------------------------------------------------- 
+\subsection{Dumping the chunk store}
+
+ A simple routine to dump a human readable representation of
+the chunk store for debug purposes is included.
+<<Chunk store dump implementation>>=
+/* Dump the chunk store to file FP --for debug purposes
+ */
+void chk_dump(FILE *fp){
+
+  int ind,j;
+
+  assert(chk_surf_nents >=2 && chk_surf_nents <= CHK_MAX_SURF_ENT);
+  fprintf(fp,"chunk_t is %d bytes long\n\n",sizeof(chunk_t));
+  fprintf(fp,"chunk store {\n\tnents=%d",chk_surf_nents);
+  for (ind=0; ind < chk_surf_nents; ind++ ){
+      assert(chk_surface[ind] != NULL);
+      fprintf(fp,"\n\t[%2d] at 0x%x: ",ind, chk_surface[ind]);
+      dump_one_chunk_tabbing(fp,1,chk_surface[ind]);
+  }
+  fprintf(fp,"} chunk store\n\n");
+
+}
+@ 
+
+It will use a routine to dump a chunk and its hidden chunks
+recursively.
+<<Dump chunks recursively>>=
+static void dump_one_chunk_tabbing(FILE *fp, int numtabs, chunk_t *c)
+{
+   assert(c!=NULL);
+
+   fprintf(fp,"chunk = {\n");
+   tabto(fp,numtabs); fprintf(fp,"  vstart=0x%x\n",c->vstart);
+   tabto(fp,numtabs); fprintf(fp,"  seg at 0x%x\n",c->seg);
+   tabto(fp,numtabs); fprintf(fp,"  next hidden at 0x%x\n",c->chk_nxt);
+   tabto(fp,numtabs); fprintf(fp,"  hidden %d chunks ",c->num_hidden);
+
+   if (c->num_hidden){    
+     chunk_t *aux;
+     int      hidden_count = 0;
+     assert(c->chk_hidden != NULL);
+     fprintf(fp," = {\n");
+     aux = c->chk_hidden;
+     while(aux != NULL){
+        hidden_count++;
+        tabto(fp,numtabs+1); dump_one_chunk_tabbing(fp,numtabs+1,aux);
+        aux = aux->chk_nxt;
+     }
+     assert(hidden_count == c->num_hidden);
+     tabto(fp,numtabs); fprintf(fp,"  }\n");
+   }
+   else {
+     assert(c->chk_hidden == NULL);
+     fprintf(fp,"\n");
+   }
+   tabto(fp,numtabs); fprintf(fp,"}\n");
+}
+@ %def dump_one_chunk_tabbing
+
+A [[tabto]] routine was used to indent the output.
+<<Print n tabs>>=
+static void tabto(FILE *fp, int numtabs)
+{
+  while (numtabs--)
+    fprintf(fp,"\t");
+}
+@ %def tabto
+
+\subsection{Special entries in the chunk store}
+
+To conclude we need to define some constants.
+<<Chunk constants>>=
+   chunk_t chk_null_chunk_at_zero = { NULL, 
+                                      (vaddr_t)0,
+                                      NULL, NULL, 0};
+   chunk_t chk_null_chunk_at_mmax = { NULL, 
+                                      (vaddr_t)-1,
+                                      NULL, NULL, 0};
+@ %def chk_null_chunk_at_zero chk_null_chunk_at_mmax
+
+
+%% -------------------------------------------------------------- 
+\subsection{Chunk store implementation}
+
+The chunk implementation is then
+
+<<chunk.c*>>=
+#include <assert.h>             /* for assertions */
+#ifdef DEBUG
+#include <stdio.h>      /* for fprintf */
+#endif
+#include "chunk.h"
+
+<<Chunk constants>>
+
+<<Chunk global variables>>
+
+<<Chunk initialization implementation>>
+<<chunk insertion implementation>>
+<<Point lookup implementation>>
+<<Segment deletion implementation>>
+#ifdef DEBUG
+<<Print n tabs>>
+<<Dump chunks recursively>>
+<<Chunk store dump implementation>>
+#endif
+@ 
+
+%% -------------------------------------------------------------- 
+\subsection{Chunk store interface}
+
+The header file is
+
+<<chunk.h*>>= 
+#ifndef _CHUNK_H
+#define _CHUNK_H 1
+
+#include "seg.h"                /* to define seg_t */
+
+<<Chunk data type>>
+
+#define alloc_chunk()   ((chunk_t*)malloc(sizeof(chunk_t)))
+#define free_chunk(c)   free(c)
+
+<<chunk operations>>
+#endif 
+@ 
+
